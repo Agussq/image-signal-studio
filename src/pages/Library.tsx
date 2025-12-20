@@ -1,18 +1,10 @@
 import { useState, useCallback } from "react";
 import { Layout } from "@/components/layout/Layout";
 import { Button } from "@/components/ui/button";
-import { Upload, Image as ImageIcon, Check, MoreHorizontal, Trash2, Settings } from "lucide-react";
+import { Upload, Check, Trash2, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Link } from "react-router-dom";
-
-interface UploadedImage {
-  id: string;
-  name: string;
-  size: number;
-  preview: string;
-  status: "raw" | "optimized";
-  tags: string[];
-}
+import { useNavigate } from "react-router-dom";
+import { useImageContext } from "@/context/ImageContext";
 
 const formatFileSize = (bytes: number) => {
   if (bytes >= 1024 * 1024) {
@@ -22,8 +14,17 @@ const formatFileSize = (bytes: number) => {
 };
 
 export default function Library() {
-  const [images, setImages] = useState<UploadedImage[]>([]);
-  const [selectedImages, setSelectedImages] = useState<Set<string>>(new Set());
+  const navigate = useNavigate();
+  const {
+    images,
+    addImages,
+    removeImages,
+    selectedImageIds,
+    setSelectedImageIds,
+    toggleSelection,
+    selectAll,
+  } = useImageContext();
+
   const [isDragging, setIsDragging] = useState(false);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -44,50 +45,21 @@ export default function Library() {
       file.type.startsWith('image/')
     );
     
-    processFiles(files);
-  }, []);
+    addImages(files);
+  }, [addImages]);
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files ? Array.from(e.target.files) : [];
-    processFiles(files);
-  };
-
-  const processFiles = (files: File[]) => {
-    const newImages: UploadedImage[] = files.map((file) => ({
-      id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      name: file.name,
-      size: file.size,
-      preview: URL.createObjectURL(file),
-      status: "raw" as const,
-      tags: [],
-    }));
-    
-    setImages(prev => [...prev, ...newImages]);
-  };
-
-  const toggleImageSelection = (id: string) => {
-    setSelectedImages(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  };
-
-  const selectAll = () => {
-    if (selectedImages.size === images.length) {
-      setSelectedImages(new Set());
-    } else {
-      setSelectedImages(new Set(images.map(img => img.id)));
-    }
+    addImages(files);
   };
 
   const deleteSelected = () => {
-    setImages(prev => prev.filter(img => !selectedImages.has(img.id)));
-    setSelectedImages(new Set());
+    removeImages(Array.from(selectedImageIds));
+  };
+
+  const handleOptimize = () => {
+    // Selection is already stored in context, just navigate
+    navigate("/optimize");
   };
 
   const hasImages = images.length > 0;
@@ -111,9 +83,9 @@ export default function Library() {
                   size="editorial" 
                   onClick={selectAll}
                 >
-                  {selectedImages.size === images.length ? "Deselect All" : "Select All"}
+                  {selectedImageIds.size === images.length ? "Deselect All" : "Select All"}
                 </Button>
-                {selectedImages.size > 0 && (
+                {selectedImageIds.size > 0 && (
                   <>
                     <Button 
                       variant="editorial-ghost" 
@@ -122,17 +94,15 @@ export default function Library() {
                       className="text-destructive hover:text-destructive"
                     >
                       <Trash2 className="w-4 h-4 mr-2" />
-                      Delete ({selectedImages.size})
+                      Delete ({selectedImageIds.size})
                     </Button>
                     <Button 
-                      asChild
+                      onClick={handleOptimize}
                       variant="editorial-filled" 
                       size="editorial"
                     >
-                      <Link to="/optimize">
-                        <Settings className="w-4 h-4 mr-2" />
-                        Optimize ({selectedImages.size})
-                      </Link>
+                      <Settings className="w-4 h-4 mr-2" />
+                      Optimize ({selectedImageIds.size})
                     </Button>
                   </>
                 )}
@@ -213,10 +183,10 @@ export default function Library() {
                 {images.map((image) => (
                   <div 
                     key={image.id}
-                    onClick={() => toggleImageSelection(image.id)}
+                    onClick={() => toggleSelection(image.id)}
                     className={cn(
                       "group relative aspect-square cursor-pointer overflow-hidden border transition-all duration-200",
-                      selectedImages.has(image.id) 
+                      selectedImageIds.has(image.id) 
                         ? "border-foreground ring-2 ring-foreground ring-offset-2" 
                         : "border-border hover:border-muted-foreground"
                     )}
@@ -231,11 +201,11 @@ export default function Library() {
                     {/* Selection Indicator */}
                     <div className={cn(
                       "absolute top-3 left-3 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all",
-                      selectedImages.has(image.id)
+                      selectedImageIds.has(image.id)
                         ? "bg-foreground border-foreground"
                         : "bg-background/80 border-muted-foreground opacity-0 group-hover:opacity-100"
                     )}>
-                      {selectedImages.has(image.id) && (
+                      {selectedImageIds.has(image.id) && (
                         <Check className="w-4 h-4 text-background" />
                       )}
                     </div>
