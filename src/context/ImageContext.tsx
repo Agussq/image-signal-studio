@@ -1,6 +1,24 @@
 import { createContext, useContext, useState, useCallback, ReactNode } from "react";
-import { getKeywordsForCategory, spaceDescriptors } from "@/lib/seo-templates";
-import { PlatformKey, PLATFORM_KEYS, stripExtension, slugify, buildSlugBase, buildFilename } from "@/lib/slug-utils";
+import { 
+  SpaceCategory, 
+  getKeywordMasterForCategory, 
+  getDescriptorForImage,
+  generatePhotoId,
+  generateHashtags,
+  makeSlugBase,
+  makeFilenames,
+  makeAltWeb,
+  makeCaptionWeb,
+  makeCaptionInstagram,
+  makeCaptionGoogleBusiness,
+  makePinterestTitle,
+  makePinterestDescription,
+} from "@/lib/metadata-engine";
+import { PlatformKey, PLATFORM_KEYS } from "@/lib/slug-utils";
+
+// ============================================
+// IMAGE DATA MODEL - Extended with metadata fields
+// ============================================
 
 export interface UploadedImage {
   id: string;
@@ -10,20 +28,29 @@ export interface UploadedImage {
   preview: string;
   status: "raw" | "optimized";
   tags: string[];
+  // Extended fields for metadata engine
+  photoId: string;
+  category: SpaceCategory;
+  descriptor: string;
+  keywordMaster: string;
+  hashtags: string[];
+  notes: string;
 }
 
-// Extended metadata structure for persisted data
+// Extended metadata structure for persisted data per platform
 export interface ImageMetadata {
   filename: string;
   altText: string;
   caption: string;
-  // Required extended fields for export
   descriptor: string;
   keywordMaster: string;
   slugBase: string;
   neighborhood: string;
   city: string;
   newFilename: string;
+  // Pinterest-specific
+  pinterestTitle?: string;
+  pinterestDescription?: string;
 }
 
 export interface ImagePlatformMetadata {
@@ -45,6 +72,11 @@ interface ImageContextType {
   addImages: (files: File[]) => void;
   removeImages: (ids: string[]) => void;
   clearImages: () => void;
+  
+  // Update image metadata fields
+  updateImageField: (id: string, field: keyof Pick<UploadedImage, 'category' | 'descriptor' | 'photoId' | 'hashtags' | 'notes'>, value: any) => void;
+  bulkUpdateCategory: (ids: string[], category: SpaceCategory) => void;
+  bulkUpdateHashtags: (ids: string[], hashtags: string[]) => void;
   
   // Selection
   selectedImageIds: Set<string>;
@@ -73,15 +105,12 @@ interface ImageContextType {
   setCurrentCategory: (category: string) => void;
   currentLocation: string;
   setCurrentLocation: (location: string) => void;
+  
+  // Space config
+  spaceConfig: typeof SPACE_CONFIG;
 }
 
 const ImageContext = createContext<ImageContextType | null>(null);
-
-// Get deterministic descriptor based on image name (stable, not random)
-function getDescriptorForImage(imageName: string): string {
-  const hash = imageName.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
-  return spaceDescriptors[hash % spaceDescriptors.length];
-}
 
 // Parse location into neighborhood and city
 function parseLocation(location: string): { neighborhood: string; city: string } {
@@ -99,20 +128,39 @@ export function ImageProvider({ children }: { children: ReactNode }) {
   
   // Optimization settings
   const [currentPlatform, setCurrentPlatform] = useState("web");
-  const [currentCategory, setCurrentCategory] = useState("Studio Photography");
+  const [currentCategory, setCurrentCategory] = useState("main_room_wide");
   const [currentLocation, setCurrentLocation] = useState("SoHo, New York City");
 
   const addImages = useCallback((files: File[]) => {
-    const newImages: UploadedImage[] = files.map((file) => ({
-      id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      file,
-      name: file.name,
-      size: file.size,
-      preview: URL.createObjectURL(file),
-      status: "raw" as const,
-      tags: [],
-    }));
-    setImages(prev => [...prev, ...newImages]);
+    setImages(prev => {
+      const startIndex = prev.length;
+      const newImages: UploadedImage[] = files.map((file, idx) => {
+        const photoId = generatePhotoId(file.name, startIndex + idx);
+        const category: SpaceCategory = 'main_room_wide';
+        const descriptor = getDescriptorForImage(file.name);
+        const keywordMaster = getKeywordMasterForCategory(category);
+        const { neighborhood, city } = parseLocation("SoHo, New York City");
+        const hashtags = generateHashtags(category, neighborhood, city);
+        
+        return {
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          file,
+          name: file.name,
+          size: file.size,
+          preview: URL.createObjectURL(file),
+          status: "raw" as const,
+          tags: [],
+          // Extended fields
+          photoId,
+          category,
+          descriptor,
+          keywordMaster,
+          hashtags,
+          notes: '',
+        };
+      });
+      return [...prev, ...newImages];
+    });
   }, []);
 
   const removeImages = useCallback((ids: string[]) => {
@@ -144,6 +192,48 @@ export function ImageProvider({ children }: { children: ReactNode }) {
     setSelectedImageIds(new Set());
     setMetadataMap(new Map());
   }, [images]);
+
+  // Update individual image field
+  const updateImageField = useCallback((
+    id: string, 
+    field: keyof Pick<UploadedImage, 'category' | 'descriptor' | 'photoId' | 'hashtags' | 'notes'>, 
+    value: any
+  ) => {
+    setImages(prev => prev.map(img => {
+      if (img.id !== id) return img;
+      
+      const updated = { ...img, [field]: value };
+      
+      // If category changed, update keywordMaster and hashtags
+      if (field === 'category') {
+        const { neighborhood, city } = parseLocation(currentLocation);
+        updated.keywordMaster = getKeywordMasterForCategory(value as SpaceCategory);
+        updated.hashtags = generateHashtags(value as SpaceCategory, neighborhood, city);
+      }
+      
+      return updated;
+    }));
+  }, [currentLocation]);
+
+  // Bulk update category
+  const bulkUpdateCategory = useCallback((ids: string[], category: SpaceCategory) => {
+    const { neighborhood, city } = parseLocation(currentLocation);
+    const keywordMaster = getKeywordMasterForCategory(category);
+    const hashtags = generateHashtags(category, neighborhood, city);
+    
+    setImages(prev => prev.map(img => {
+      if (!ids.includes(img.id)) return img;
+      return { ...img, category, keywordMaster, hashtags };
+    }));
+  }, [currentLocation]);
+
+  // Bulk update hashtags
+  const bulkUpdateHashtags = useCallback((ids: string[], hashtags: string[]) => {
+    setImages(prev => prev.map(img => {
+      if (!ids.includes(img.id)) return img;
+      return { ...img, hashtags };
+    }));
+  }, []);
 
   const toggleSelection = useCallback((id: string) => {
     setSelectedImageIds(prev => {
@@ -177,32 +267,63 @@ export function ImageProvider({ children }: { children: ReactNode }) {
   const generateMetadataForImage = useCallback((
     imageId: string,
     platform: string,
-    category: string,
+    _category: string,
     location: string
   ) => {
     const image = images.find(img => img.id === imageId);
     if (!image) return;
 
     const { neighborhood, city } = parseLocation(location);
-    const keywords = getKeywordsForCategory(category);
-    const keywordMaster = keywords.slice(0, 3).join('; ');
-    const descriptor = getDescriptorForImage(image.name);
-    const photoId = stripExtension(image.name);
+    
+    // Use image's stored fields
+    const keywordMaster = image.keywordMaster;
+    const descriptor = image.descriptor;
+    const photoId = image.photoId;
+    const hashtags = image.hashtags;
 
-    const slugBase = buildSlugBase({
+    const slugBase = makeSlugBase({
       spaceName: SPACE_CONFIG.spaceName,
       neighborhood,
       city,
-      keywordMaster: keywords[0] || 'studio',
+      keywordMaster,
       descriptor,
       photoId,
     });
 
-    const newFilename = buildFilename(slugBase, platform as PlatformKey);
+    const filenames = makeFilenames(slugBase);
+    const newFilename = filenames[platform as keyof typeof filenames] || filenames.web;
 
-    // Build alt text and caption based on platform
-    const altText = `${descriptor} at ${SPACE_CONFIG.spaceName}, ${neighborhood}, ${city}.`;
-    const caption = `${SPACE_CONFIG.spaceName} in ${neighborhood}, ${city} — ${descriptor}. Ideal for shoots/events.`;
+    const altText = makeAltWeb(SPACE_CONFIG.spaceName, neighborhood, city, descriptor);
+    
+    // Platform-specific captions
+    let caption = '';
+    let pinterestTitle = '';
+    let pinterestDescription = '';
+    
+    switch (platform) {
+      case 'web':
+        caption = makeCaptionWeb(SPACE_CONFIG.spaceName, neighborhood, city, descriptor);
+        break;
+      case 'instagram':
+        caption = makeCaptionInstagram(
+          SPACE_CONFIG.spaceName,
+          descriptor,
+          [keywordMaster, 'natural light', 'flexible layout'],
+          'Book your session today! 📸',
+          hashtags
+        );
+        break;
+      case 'google-business':
+        caption = makeCaptionGoogleBusiness(neighborhood, city, descriptor);
+        break;
+      case 'pinterest':
+        caption = makePinterestDescription(keywordMaster, descriptor, neighborhood, city);
+        pinterestTitle = makePinterestTitle(keywordMaster, descriptor, neighborhood, city);
+        pinterestDescription = makePinterestDescription(keywordMaster, descriptor, neighborhood, city);
+        break;
+      default:
+        caption = makeCaptionWeb(SPACE_CONFIG.spaceName, neighborhood, city, descriptor);
+    }
 
     const metadata: ImageMetadata = {
       filename: newFilename,
@@ -214,6 +335,8 @@ export function ImageProvider({ children }: { children: ReactNode }) {
       neighborhood,
       city,
       newFilename,
+      pinterestTitle,
+      pinterestDescription,
     };
     
     setMetadataMap(prev => {
@@ -228,87 +351,139 @@ export function ImageProvider({ children }: { children: ReactNode }) {
   // Generate metadata for all selected images for a specific platform
   const generateMetadataForAll = useCallback((
     platform: string,
-    category: string,
+    _category: string,
     location: string
   ) => {
     const selected = getSelectedImages();
-    
-    selected.forEach(image => {
-      const { neighborhood, city } = parseLocation(location);
-      const keywords = getKeywordsForCategory(category);
-      const keywordMaster = keywords.slice(0, 3).join('; ');
-      const descriptor = getDescriptorForImage(image.name);
-      const photoId = stripExtension(image.name);
-
-      const slugBase = buildSlugBase({
-        spaceName: SPACE_CONFIG.spaceName,
-        neighborhood,
-        city,
-        keywordMaster: keywords[0] || 'studio',
-        descriptor,
-        photoId,
-      });
-
-      const newFilename = buildFilename(slugBase, platform as PlatformKey);
-
-      const altText = `${descriptor} at ${SPACE_CONFIG.spaceName}, ${neighborhood}, ${city}.`;
-      const caption = `${SPACE_CONFIG.spaceName} in ${neighborhood}, ${city} — ${descriptor}. Ideal for shoots/events.`;
-
-      const metadata: ImageMetadata = {
-        filename: newFilename,
-        altText,
-        caption,
-        descriptor,
-        keywordMaster,
-        slugBase,
-        neighborhood,
-        city,
-        newFilename,
-      };
-
-      setMetadataMap(prev => {
-        const next = new Map(prev);
-        const imageMap = next.get(image.id) || new Map<string, ImageMetadata>();
-        imageMap.set(platform, metadata);
-        next.set(image.id, imageMap);
-        return next;
-      });
-    });
-  }, [getSelectedImages]);
-
-  // Generate metadata for ALL platforms for all selected images
-  const generateMetadataForAllPlatforms = useCallback((
-    category: string,
-    location: string
-  ) => {
-    const selected = getSelectedImages();
+    const { neighborhood, city } = parseLocation(location);
     
     setMetadataMap(prev => {
       const next = new Map(prev);
       
       selected.forEach(image => {
-        const { neighborhood, city } = parseLocation(location);
-        const keywords = getKeywordsForCategory(category);
-        const keywordMaster = keywords.slice(0, 3).join('; ');
-        const descriptor = getDescriptorForImage(image.name);
-        const photoId = stripExtension(image.name);
+        const keywordMaster = image.keywordMaster;
+        const descriptor = image.descriptor;
+        const photoId = image.photoId;
+        const hashtags = image.hashtags;
 
-        const slugBase = buildSlugBase({
+        const slugBase = makeSlugBase({
           spaceName: SPACE_CONFIG.spaceName,
           neighborhood,
           city,
-          keywordMaster: keywords[0] || 'studio',
+          keywordMaster,
           descriptor,
           photoId,
         });
 
+        const filenames = makeFilenames(slugBase);
+        const newFilename = filenames[platform as keyof typeof filenames] || filenames.web;
+
+        const altText = makeAltWeb(SPACE_CONFIG.spaceName, neighborhood, city, descriptor);
+        
+        let caption = '';
+        let pinterestTitle = '';
+        let pinterestDescription = '';
+        
+        switch (platform) {
+          case 'instagram':
+            caption = makeCaptionInstagram(
+              SPACE_CONFIG.spaceName, descriptor,
+              [keywordMaster, 'natural light', 'flexible layout'],
+              'Book your session today! 📸', hashtags
+            );
+            break;
+          case 'google-business':
+            caption = makeCaptionGoogleBusiness(neighborhood, city, descriptor);
+            break;
+          case 'pinterest':
+            caption = makePinterestDescription(keywordMaster, descriptor, neighborhood, city);
+            pinterestTitle = makePinterestTitle(keywordMaster, descriptor, neighborhood, city);
+            pinterestDescription = caption;
+            break;
+          default:
+            caption = makeCaptionWeb(SPACE_CONFIG.spaceName, neighborhood, city, descriptor);
+        }
+
+        const metadata: ImageMetadata = {
+          filename: newFilename,
+          altText,
+          caption,
+          descriptor,
+          keywordMaster,
+          slugBase,
+          neighborhood,
+          city,
+          newFilename,
+          pinterestTitle,
+          pinterestDescription,
+        };
+
+        const imageMap = next.get(image.id) || new Map<string, ImageMetadata>();
+        imageMap.set(platform, metadata);
+        next.set(image.id, imageMap);
+      });
+
+      return next;
+    });
+  }, [getSelectedImages]);
+
+  // Generate metadata for ALL platforms for all selected images
+  const generateMetadataForAllPlatforms = useCallback((
+    _category: string,
+    location: string
+  ) => {
+    const selected = getSelectedImages();
+    const { neighborhood, city } = parseLocation(location);
+    
+    setMetadataMap(prev => {
+      const next = new Map(prev);
+      
+      selected.forEach(image => {
+        const keywordMaster = image.keywordMaster;
+        const descriptor = image.descriptor;
+        const photoId = image.photoId;
+        const hashtags = image.hashtags;
+
+        const slugBase = makeSlugBase({
+          spaceName: SPACE_CONFIG.spaceName,
+          neighborhood,
+          city,
+          keywordMaster,
+          descriptor,
+          photoId,
+        });
+
+        const filenames = makeFilenames(slugBase);
         const imageMap = next.get(image.id) || new Map<string, ImageMetadata>();
 
         // Generate for each platform
         PLATFORM_KEYS.forEach(platformKey => {
-          const newFilename = buildFilename(slugBase, platformKey);
-          const altText = `${descriptor} at ${SPACE_CONFIG.spaceName}, ${neighborhood}, ${city}.`;
-          const caption = `${SPACE_CONFIG.spaceName} in ${neighborhood}, ${city} — ${descriptor}. Ideal for shoots/events.`;
+          const newFilename = filenames[platformKey as keyof typeof filenames] || filenames.web;
+          const altText = makeAltWeb(SPACE_CONFIG.spaceName, neighborhood, city, descriptor);
+          
+          let caption = '';
+          let pinterestTitle = '';
+          let pinterestDescription = '';
+          
+          switch (platformKey) {
+            case 'instagram':
+              caption = makeCaptionInstagram(
+                SPACE_CONFIG.spaceName, descriptor,
+                [keywordMaster, 'natural light', 'flexible layout'],
+                'Book your session today! 📸', hashtags
+              );
+              break;
+            case 'google-business':
+              caption = makeCaptionGoogleBusiness(neighborhood, city, descriptor);
+              break;
+            case 'pinterest':
+              pinterestTitle = makePinterestTitle(keywordMaster, descriptor, neighborhood, city);
+              pinterestDescription = makePinterestDescription(keywordMaster, descriptor, neighborhood, city);
+              caption = pinterestDescription;
+              break;
+            default:
+              caption = makeCaptionWeb(SPACE_CONFIG.spaceName, neighborhood, city, descriptor);
+          }
 
           const metadata: ImageMetadata = {
             filename: newFilename,
@@ -320,6 +495,8 @@ export function ImageProvider({ children }: { children: ReactNode }) {
             neighborhood,
             city,
             newFilename,
+            pinterestTitle,
+            pinterestDescription,
           };
 
           imageMap.set(platformKey, metadata);
@@ -369,6 +546,9 @@ export function ImageProvider({ children }: { children: ReactNode }) {
       addImages,
       removeImages,
       clearImages,
+      updateImageField,
+      bulkUpdateCategory,
+      bulkUpdateHashtags,
       selectedImageIds,
       setSelectedImageIds,
       toggleSelection,
@@ -387,6 +567,7 @@ export function ImageProvider({ children }: { children: ReactNode }) {
       setCurrentCategory,
       currentLocation,
       setCurrentLocation,
+      spaceConfig: SPACE_CONFIG,
     }}>
       {children}
     </ImageContext.Provider>
