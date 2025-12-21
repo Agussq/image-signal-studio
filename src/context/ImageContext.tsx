@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useCallback, ReactNode } from "react";
-import { generateMetadata, platformExportConfigs } from "@/lib/seo-templates";
+import { generateMetadata } from "@/lib/seo-templates";
+import { PlatformKey } from "@/lib/slug-utils";
 
 export interface UploadedImage {
   id: string;
@@ -15,6 +16,12 @@ export interface ImageMetadata {
   filename: string;
   altText: string;
   caption: string;
+  // Extended fields for persisted metadata
+  descriptor?: string;
+  keywordMaster?: string;
+  slugBase?: string;
+  neighborhood?: string;
+  city?: string;
 }
 
 export interface ImagePlatformMetadata {
