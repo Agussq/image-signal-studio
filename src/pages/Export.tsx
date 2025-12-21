@@ -113,19 +113,27 @@ interface PersistedMetadata extends ImageMetadata {
   newFilename: string;
 }
 
-// CSV row structure for long format (row-per-file)
+// CSV row structure for long format (row-per-file) - exact schema required
 interface CSVRow {
-  platformKey: string;
-  newFilename: string;
-  altText: string;
+  original_filename: string;
+  platform: string;
+  new_filename: string;
+  alt_text: string;
   caption: string;
-  keywordMaster: string;
-  descriptor: string;
-  slugBase: string;
-  neighborhood: string;
-  city: string;
   category: string;
-  originalFilename: string;
+  location: string;
+  keyword_master: string;
+  descriptor: string;
+  slug_base: string;
+}
+
+// Export manifest for debug/verification
+interface ExportManifest {
+  selectedImageCount: number;
+  platformCount: number;
+  expectedTotalFiles: number;
+  actualZipFiles: number;
+  csvRowsGenerated: number;
 }
 
 export default function Export() {
@@ -142,6 +150,7 @@ export default function Export() {
   const [progress, setProgress] = useState<ExportProgress>({ step: "", percentage: 0, isComplete: false });
   const [downloaded, setDownloaded] = useState<Set<string>>(new Set());
   const [exportError, setExportError] = useState<ExportError | null>(null);
+  const [manifest, setManifest] = useState<ExportManifest | null>(null);
 
   // Single source of truth: imagesToExport
   const imagesToExport = useMemo((): UploadedImage[] => {
@@ -189,7 +198,14 @@ export default function Export() {
     });
   };
 
+  // Escape caption for CSV - replace real newlines with literal \n
+  const sanitizeCaption = useCallback((caption: string): string => {
+    // Replace actual newlines with literal \n for CSV readability
+    return caption.replace(/\r\n/g, '\\n').replace(/\n/g, '\\n').replace(/\r/g, '\\n');
+  }, []);
+
   // Build export data from PERSISTED metadata only (no regeneration)
+  // CRITICAL: NO truncation - use full values for export
   const buildExportData = useCallback((): { csvRows: CSVRow[]; fileEntries: Array<{ platformKey: PlatformKey; filename: string; image: UploadedImage }> } | null => {
     const csvRows: CSVRow[] = [];
     const fileEntries: Array<{ platformKey: PlatformKey; filename: string; image: UploadedImage }> = [];
@@ -204,22 +220,25 @@ export default function Export() {
           return null;
         }
 
-        // Use persisted filename directly
+        // Use persisted filename directly - FULL filename, no truncation
         const filename = meta.newFilename;
 
-        // CSV row with separate neighborhood/city columns
+        // Build location string (will be properly escaped by PapaParse)
+        const location = `${meta.neighborhood}, ${meta.city}`;
+
+        // CSV row with exact schema required
+        // CRITICAL: Use full values, no truncation, no ellipses
         csvRows.push({
-          platformKey,
-          newFilename: filename,
-          altText: meta.altText,
-          caption: meta.caption,
-          keywordMaster: meta.keywordMaster,
-          descriptor: meta.descriptor,
-          slugBase: meta.slugBase,
-          neighborhood: meta.neighborhood,
-          city: meta.city,
+          original_filename: image.name,
+          platform: platformKey,
+          new_filename: filename,
+          alt_text: meta.altText,
+          caption: sanitizeCaption(meta.caption),
           category: currentCategory,
-          originalFilename: image.name,
+          location: location,
+          keyword_master: meta.keywordMaster,
+          descriptor: meta.descriptor,
+          slug_base: meta.slugBase,
         });
 
         // File entry
@@ -232,7 +251,7 @@ export default function Export() {
     }
 
     return { csvRows, fileEntries };
-  }, [imagesToExport, selectedPlatformKeys, metadataMap, currentCategory]);
+  }, [imagesToExport, selectedPlatformKeys, metadataMap, currentCategory, sanitizeCaption]);
 
   // Self-test: verify counts match before download
   const runSelfTest = useCallback((
@@ -256,9 +275,12 @@ export default function Export() {
   }, []);
 
   // Generate RFC-compliant CSV using PapaParse
+  // All fields are quoted to ensure proper escaping of commas, quotes, newlines
   const generateCSV = useCallback((rows: CSVRow[]): string => {
     return Papa.unparse(rows, {
-      quotes: true,
+      quotes: true, // Quote ALL fields for safety
+      quoteChar: '"',
+      escapeChar: '"',
       header: true,
     });
   }, []);
@@ -316,6 +338,7 @@ export default function Export() {
 
   const handleExportPack = useCallback(async () => {
     setExportError(null);
+    setManifest(null);
 
     // Step 1: Check for missing metadata FIRST
     const missing = checkMissingMetadata();
@@ -382,6 +405,16 @@ export default function Export() {
 
         await new Promise(resolve => setTimeout(resolve, 20));
       }
+
+      // Update manifest with current counts
+      const currentManifest: ExportManifest = {
+        selectedImageCount: imagesToExport.length,
+        platformCount: selectedPlatformKeys.length,
+        expectedTotalFiles: expectedFileCount,
+        actualZipFiles: addedFileCount,
+        csvRowsGenerated: csvRows.length,
+      };
+      setManifest(currentManifest);
 
       // Step: Self-test before download
       currentStep++;
@@ -460,6 +493,8 @@ export default function Export() {
   ]);
 
   const handleDownloadCSV = useCallback(() => {
+    setExportError(null);
+    
     const missing = checkMissingMetadata();
     if (missing.length > 0) {
       const details = missing.slice(0, 10).map(m => `${m.imageName} → ${m.platformKey}`);
@@ -479,8 +514,18 @@ export default function Export() {
       return;
     }
 
+    // Update manifest for visibility
+    const expectedCount = imagesToExport.length * selectedPlatformKeys.length;
+    setManifest({
+      selectedImageCount: imagesToExport.length,
+      platformCount: selectedPlatformKeys.length,
+      expectedTotalFiles: expectedCount,
+      actualZipFiles: exportData.fileEntries.length,
+      csvRowsGenerated: exportData.csvRows.length,
+    });
+
     const csv = generateCSV(exportData.csvRows);
-    const blob = new Blob([csv], { type: "text/csv" });
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -489,7 +534,7 @@ export default function Export() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [checkMissingMetadata, buildExportData, generateCSV]);
+  }, [checkMissingMetadata, buildExportData, generateCSV, imagesToExport.length, selectedPlatformKeys.length]);
 
   // Redirect if no images at all
   if (images.length === 0) {
@@ -667,6 +712,53 @@ export default function Export() {
                 style={{ width: `${progress.percentage}%` }}
               />
             </div>
+          </div>
+        </section>
+      )}
+
+      {/* Export Manifest Panel - Debug/Verification */}
+      {manifest && (
+        <section className="py-8 px-6 lg:px-12 border-b border-border bg-muted/20">
+          <div className="max-w-7xl mx-auto">
+            <div className="flex items-center gap-3 mb-4">
+              <FileText className="w-4 h-4 text-muted-foreground" />
+              <h3 className="text-sm font-medium">Export Manifest</h3>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+              <div className="p-3 border border-border bg-background">
+                <p className="text-muted-foreground text-xs mb-1">Selected Images</p>
+                <p className="font-mono font-medium">{manifest.selectedImageCount}</p>
+              </div>
+              <div className="p-3 border border-border bg-background">
+                <p className="text-muted-foreground text-xs mb-1">Platforms</p>
+                <p className="font-mono font-medium">{manifest.platformCount}</p>
+              </div>
+              <div className="p-3 border border-border bg-background">
+                <p className="text-muted-foreground text-xs mb-1">Expected Files</p>
+                <p className="font-mono font-medium">{manifest.expectedTotalFiles}</p>
+              </div>
+              <div className="p-3 border border-border bg-background">
+                <p className="text-muted-foreground text-xs mb-1">ZIP Files Added</p>
+                <p className={cn(
+                  "font-mono font-medium",
+                  manifest.actualZipFiles === manifest.expectedTotalFiles ? "text-green-600" : "text-destructive"
+                )}>{manifest.actualZipFiles}</p>
+              </div>
+              <div className="p-3 border border-border bg-background">
+                <p className="text-muted-foreground text-xs mb-1">CSV Rows</p>
+                <p className={cn(
+                  "font-mono font-medium",
+                  manifest.csvRowsGenerated === manifest.expectedTotalFiles ? "text-green-600" : "text-destructive"
+                )}>{manifest.csvRowsGenerated}</p>
+              </div>
+            </div>
+            {manifest.actualZipFiles === manifest.expectedTotalFiles && 
+             manifest.csvRowsGenerated === manifest.expectedTotalFiles && (
+              <p className="text-xs text-green-600 mt-3 flex items-center gap-2">
+                <Check className="w-3 h-3" />
+                All counts match — export is consistent
+              </p>
+            )}
           </div>
         </section>
       )}
