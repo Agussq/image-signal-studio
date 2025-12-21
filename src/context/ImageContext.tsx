@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useCallback, ReactNode } from "react";
-import { generateMetadata } from "@/lib/seo-templates";
-import { PlatformKey } from "@/lib/slug-utils";
+import { getKeywordsForCategory, spaceDescriptors } from "@/lib/seo-templates";
+import { PlatformKey, PLATFORM_KEYS, stripExtension, slugify, buildSlugBase, buildFilename } from "@/lib/slug-utils";
 
 export interface UploadedImage {
   id: string;
@@ -12,16 +12,18 @@ export interface UploadedImage {
   tags: string[];
 }
 
+// Extended metadata structure for persisted data
 export interface ImageMetadata {
   filename: string;
   altText: string;
   caption: string;
-  // Extended fields for persisted metadata
-  descriptor?: string;
-  keywordMaster?: string;
-  slugBase?: string;
-  neighborhood?: string;
-  city?: string;
+  // Required extended fields for export
+  descriptor: string;
+  keywordMaster: string;
+  slugBase: string;
+  neighborhood: string;
+  city: string;
+  newFilename: string;
 }
 
 export interface ImagePlatformMetadata {
@@ -29,6 +31,13 @@ export interface ImagePlatformMetadata {
   platform: string;
   metadata: ImageMetadata;
 }
+
+// Default space configuration
+const SPACE_CONFIG = {
+  spaceName: "Studio",
+  neighborhood: "SoHo",
+  city: "NYC",
+};
 
 interface ImageContextType {
   // Uploaded images
@@ -48,6 +57,7 @@ interface ImageContextType {
   metadataMap: Map<string, Map<string, ImageMetadata>>;
   generateMetadataForImage: (imageId: string, platform: string, category: string, location: string) => void;
   generateMetadataForAll: (platform: string, category: string, location: string) => void;
+  generateMetadataForAllPlatforms: (category: string, location: string) => void;
   updateMetadata: (imageId: string, platform: string, metadata: Partial<ImageMetadata>) => void;
   
   // Get selected images
@@ -67,13 +77,28 @@ interface ImageContextType {
 
 const ImageContext = createContext<ImageContextType | null>(null);
 
+// Get deterministic descriptor based on image name (stable, not random)
+function getDescriptorForImage(imageName: string): string {
+  const hash = imageName.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+  return spaceDescriptors[hash % spaceDescriptors.length];
+}
+
+// Parse location into neighborhood and city
+function parseLocation(location: string): { neighborhood: string; city: string } {
+  const parts = location.split(',').map(p => p.trim());
+  if (parts.length >= 2) {
+    return { neighborhood: parts[0], city: parts.slice(1).join(' ').trim() };
+  }
+  return { neighborhood: location || SPACE_CONFIG.neighborhood, city: SPACE_CONFIG.city };
+}
+
 export function ImageProvider({ children }: { children: ReactNode }) {
   const [images, setImages] = useState<UploadedImage[]>([]);
   const [selectedImageIds, setSelectedImageIds] = useState<Set<string>>(new Set());
   const [metadataMap, setMetadataMap] = useState<Map<string, Map<string, ImageMetadata>>>(new Map());
   
   // Optimization settings
-  const [currentPlatform, setCurrentPlatform] = useState("website");
+  const [currentPlatform, setCurrentPlatform] = useState("web");
   const [currentCategory, setCurrentCategory] = useState("Studio Photography");
   const [currentLocation, setCurrentLocation] = useState("SoHo, New York City");
 
@@ -148,14 +173,48 @@ export function ImageProvider({ children }: { children: ReactNode }) {
     return images.filter(img => selectedImageIds.has(img.id));
   }, [images, selectedImageIds]);
 
+  // Generate complete metadata with all extended fields for export
   const generateMetadataForImage = useCallback((
     imageId: string,
     platform: string,
     category: string,
     location: string
   ) => {
-    const imageIndex = images.findIndex(img => img.id === imageId);
-    const metadata = generateMetadata(platform, category, location, imageIndex);
+    const image = images.find(img => img.id === imageId);
+    if (!image) return;
+
+    const { neighborhood, city } = parseLocation(location);
+    const keywords = getKeywordsForCategory(category);
+    const keywordMaster = keywords.slice(0, 3).join('; ');
+    const descriptor = getDescriptorForImage(image.name);
+    const photoId = stripExtension(image.name);
+
+    const slugBase = buildSlugBase({
+      spaceName: SPACE_CONFIG.spaceName,
+      neighborhood,
+      city,
+      keywordMaster: keywords[0] || 'studio',
+      descriptor,
+      photoId,
+    });
+
+    const newFilename = buildFilename(slugBase, platform as PlatformKey);
+
+    // Build alt text and caption based on platform
+    const altText = `${descriptor} at ${SPACE_CONFIG.spaceName}, ${neighborhood}, ${city}.`;
+    const caption = `${SPACE_CONFIG.spaceName} in ${neighborhood}, ${city} — ${descriptor}. Ideal for shoots/events.`;
+
+    const metadata: ImageMetadata = {
+      filename: newFilename,
+      altText,
+      caption,
+      descriptor,
+      keywordMaster,
+      slugBase,
+      neighborhood,
+      city,
+      newFilename,
+    };
     
     setMetadataMap(prev => {
       const next = new Map(prev);
@@ -166,6 +225,7 @@ export function ImageProvider({ children }: { children: ReactNode }) {
     });
   }, [images]);
 
+  // Generate metadata for all selected images for a specific platform
   const generateMetadataForAll = useCallback((
     platform: string,
     category: string,
@@ -173,14 +233,101 @@ export function ImageProvider({ children }: { children: ReactNode }) {
   ) => {
     const selected = getSelectedImages();
     
+    selected.forEach(image => {
+      const { neighborhood, city } = parseLocation(location);
+      const keywords = getKeywordsForCategory(category);
+      const keywordMaster = keywords.slice(0, 3).join('; ');
+      const descriptor = getDescriptorForImage(image.name);
+      const photoId = stripExtension(image.name);
+
+      const slugBase = buildSlugBase({
+        spaceName: SPACE_CONFIG.spaceName,
+        neighborhood,
+        city,
+        keywordMaster: keywords[0] || 'studio',
+        descriptor,
+        photoId,
+      });
+
+      const newFilename = buildFilename(slugBase, platform as PlatformKey);
+
+      const altText = `${descriptor} at ${SPACE_CONFIG.spaceName}, ${neighborhood}, ${city}.`;
+      const caption = `${SPACE_CONFIG.spaceName} in ${neighborhood}, ${city} — ${descriptor}. Ideal for shoots/events.`;
+
+      const metadata: ImageMetadata = {
+        filename: newFilename,
+        altText,
+        caption,
+        descriptor,
+        keywordMaster,
+        slugBase,
+        neighborhood,
+        city,
+        newFilename,
+      };
+
+      setMetadataMap(prev => {
+        const next = new Map(prev);
+        const imageMap = next.get(image.id) || new Map<string, ImageMetadata>();
+        imageMap.set(platform, metadata);
+        next.set(image.id, imageMap);
+        return next;
+      });
+    });
+  }, [getSelectedImages]);
+
+  // Generate metadata for ALL platforms for all selected images
+  const generateMetadataForAllPlatforms = useCallback((
+    category: string,
+    location: string
+  ) => {
+    const selected = getSelectedImages();
+    
     setMetadataMap(prev => {
       const next = new Map(prev);
-      selected.forEach((img, index) => {
-        const metadata = generateMetadata(platform, category, location, index);
-        const imageMap = next.get(img.id) || new Map<string, ImageMetadata>();
-        imageMap.set(platform, metadata);
-        next.set(img.id, imageMap);
+      
+      selected.forEach(image => {
+        const { neighborhood, city } = parseLocation(location);
+        const keywords = getKeywordsForCategory(category);
+        const keywordMaster = keywords.slice(0, 3).join('; ');
+        const descriptor = getDescriptorForImage(image.name);
+        const photoId = stripExtension(image.name);
+
+        const slugBase = buildSlugBase({
+          spaceName: SPACE_CONFIG.spaceName,
+          neighborhood,
+          city,
+          keywordMaster: keywords[0] || 'studio',
+          descriptor,
+          photoId,
+        });
+
+        const imageMap = next.get(image.id) || new Map<string, ImageMetadata>();
+
+        // Generate for each platform
+        PLATFORM_KEYS.forEach(platformKey => {
+          const newFilename = buildFilename(slugBase, platformKey);
+          const altText = `${descriptor} at ${SPACE_CONFIG.spaceName}, ${neighborhood}, ${city}.`;
+          const caption = `${SPACE_CONFIG.spaceName} in ${neighborhood}, ${city} — ${descriptor}. Ideal for shoots/events.`;
+
+          const metadata: ImageMetadata = {
+            filename: newFilename,
+            altText,
+            caption,
+            descriptor,
+            keywordMaster,
+            slugBase,
+            neighborhood,
+            city,
+            newFilename,
+          };
+
+          imageMap.set(platformKey, metadata);
+        });
+
+        next.set(image.id, imageMap);
       });
+
       return next;
     });
   }, [getSelectedImages]);
@@ -193,7 +340,17 @@ export function ImageProvider({ children }: { children: ReactNode }) {
     setMetadataMap(prev => {
       const next = new Map(prev);
       const imageMap = next.get(imageId) || new Map<string, ImageMetadata>();
-      const existing = imageMap.get(platform) || { filename: '', altText: '', caption: '' };
+      const existing = imageMap.get(platform) || { 
+        filename: '', 
+        altText: '', 
+        caption: '',
+        descriptor: '',
+        keywordMaster: '',
+        slugBase: '',
+        neighborhood: '',
+        city: '',
+        newFilename: '',
+      };
       imageMap.set(platform, { ...existing, ...updates });
       next.set(imageId, imageMap);
       return next;
@@ -220,6 +377,7 @@ export function ImageProvider({ children }: { children: ReactNode }) {
       metadataMap,
       generateMetadataForImage,
       generateMetadataForAll,
+      generateMetadataForAllPlatforms,
       updateMetadata,
       getSelectedImages,
       markAsOptimized,

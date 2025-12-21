@@ -76,24 +76,19 @@ export const idealPlatformExtensions: Record<PlatformKey, string> = {
 };
 
 /**
- * Get the honest extension based on the original file's actual format.
- * Until real conversion is implemented, we use the original extension.
+ * Get the honest extension - until real conversion exists, always use .jpg
+ * This ensures we don't lie about file format
  */
-export function getHonestExtension(originalFilename: string, _platformKey: PlatformKey): string {
-  const ext = originalFilename.split('.').pop()?.toLowerCase() || 'jpg';
-  // Map common formats - keep original since no real conversion yet
-  const knownFormats = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'tiff', 'bmp'];
-  if (knownFormats.includes(ext)) {
-    return ext === 'jpeg' ? 'jpg' : ext;
-  }
-  return 'jpg'; // fallback
+export function getHonestExtension(_originalFilename: string, _platformKey: PlatformKey): string {
+  // Until real conversion is implemented, all exports are .jpg
+  return 'jpg';
 }
 
 /**
  * Build a deterministic filename for a specific platform
- * Uses honest extension based on actual file content
+ * Uses honest extension (always .jpg until conversion exists)
  */
-export function buildFilename(slugBase: string, platformKey: PlatformKey, originalFilename: string): string {
-  const ext = getHonestExtension(originalFilename, platformKey);
+export function buildFilename(slugBase: string, platformKey: PlatformKey, _originalFilename?: string): string {
+  const ext = 'jpg'; // Honest: no conversion yet, so always jpg
   return `${slugBase}__${platformKey}.${ext}`;
 }
