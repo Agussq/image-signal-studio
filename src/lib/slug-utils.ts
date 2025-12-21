@@ -50,9 +50,23 @@ export function buildSlugBase(params: {
 }
 
 /**
- * Platform to file extension mapping
+ * Normalized platform keys - use these everywhere for consistency
  */
-export const platformExtensions: Record<string, string> = {
+export const PLATFORM_KEYS = [
+  'web',
+  'instagram',
+  'pinterest',
+  'google-business',
+  'messaging',
+  'print',
+] as const;
+
+export type PlatformKey = typeof PLATFORM_KEYS[number];
+
+/**
+ * Platform to ideal file extension mapping (when conversion is implemented)
+ */
+export const idealPlatformExtensions: Record<PlatformKey, string> = {
   web: 'webp',
   instagram: 'jpg',
   pinterest: 'png',
@@ -62,9 +76,24 @@ export const platformExtensions: Record<string, string> = {
 };
 
 /**
- * Build a deterministic filename for a specific platform
+ * Get the honest extension based on the original file's actual format.
+ * Until real conversion is implemented, we use the original extension.
  */
-export function buildFilename(slugBase: string, platform: string): string {
-  const ext = platformExtensions[platform] || 'jpg';
-  return `${slugBase}__${platform}.${ext}`;
+export function getHonestExtension(originalFilename: string, _platformKey: PlatformKey): string {
+  const ext = originalFilename.split('.').pop()?.toLowerCase() || 'jpg';
+  // Map common formats - keep original since no real conversion yet
+  const knownFormats = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'tiff', 'bmp'];
+  if (knownFormats.includes(ext)) {
+    return ext === 'jpeg' ? 'jpg' : ext;
+  }
+  return 'jpg'; // fallback
+}
+
+/**
+ * Build a deterministic filename for a specific platform
+ * Uses honest extension based on actual file content
+ */
+export function buildFilename(slugBase: string, platformKey: PlatformKey, originalFilename: string): string {
+  const ext = getHonestExtension(originalFilename, platformKey);
+  return `${slugBase}__${platformKey}.${ext}`;
 }

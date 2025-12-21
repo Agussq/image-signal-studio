@@ -12,16 +12,27 @@ import {
   MessageCircle,
   FileText,
   ImageIcon,
-  Loader2
+  Loader2,
+  AlertCircle
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Link } from "react-router-dom";
 import { useImageContext, UploadedImage, ImageMetadata } from "@/context/ImageContext";
-import { platformExportConfigs, categoryKeywords, getKeywordsForCategory, getRandomDescriptor } from "@/lib/seo-templates";
-import { stripExtension, slugify, buildSlugBase, buildFilename, platformExtensions } from "@/lib/slug-utils";
+import { platformExportConfigs, getKeywordsForCategory, getRandomDescriptor } from "@/lib/seo-templates";
+import { stripExtension, slugify, buildSlugBase, buildFilename, PLATFORM_KEYS, PlatformKey } from "@/lib/slug-utils";
 import JSZip from "jszip";
+import Papa from "papaparse";
 
-const exportPresets = [
+// Normalized platform keys matching folder names and metadataMap keys
+const exportPresets: Array<{
+  id: string;
+  platformKey: PlatformKey;
+  icon: typeof Globe;
+  label: string;
+  format: string;
+  dimensions: string;
+  desc: string;
+}> = [
   { 
     id: "web", 
     platformKey: "web",
@@ -32,10 +43,10 @@ const exportPresets = [
     desc: "SEO-ready, fast loading"
   },
   { 
-    id: "google", 
+    id: "google-business", 
     platformKey: "google-business",
     icon: MapPin, 
-    label: "Google-Ready",
+    label: "Google Business",
     format: "WebP",
     dimensions: "1200 × 900",
     desc: "Maps & Business Profile"
@@ -84,12 +95,41 @@ interface ExportProgress {
   isComplete: boolean;
 }
 
+interface ExportError {
+  message: string;
+  details: string[];
+}
+
+// Extended metadata stored in metadataMap
+interface ExtendedMetadata extends ImageMetadata {
+  descriptor: string;
+  keywordMaster: string;
+  slugBase: string;
+  neighborhood: string;
+  city: string;
+}
+
 // Default space configuration
 const SPACE_CONFIG = {
   spaceName: "Studio",
   neighborhood: "SoHo",
   city: "NYC",
 };
+
+// CSV row structure for long format
+interface CSVRow {
+  platformKey: string;
+  newFilename: string;
+  altText: string;
+  caption: string;
+  keywordMaster: string;
+  descriptor: string;
+  slugBase: string;
+  neighborhood: string;
+  city: string;
+  category: string;
+  originalFilename: string;
+}
 
 export default function Export() {
   const {
@@ -106,6 +146,7 @@ export default function Export() {
   const [isExporting, setIsExporting] = useState(false);
   const [progress, setProgress] = useState<ExportProgress>({ step: "", percentage: 0, isComplete: false });
   const [downloaded, setDownloaded] = useState<Set<string>>(new Set());
+  const [exportError, setExportError] = useState<ExportError | null>(null);
 
   // Single source of truth: imagesToExport
   const imagesToExport = useMemo((): UploadedImage[] => {
@@ -115,29 +156,47 @@ export default function Export() {
     return images;
   }, [selectedImageIds, getSelectedImages, images]);
 
-  // Get or generate metadata for an image/platform pair
-  const getOrGenerateMetadata = useCallback((
-    imageId: string, 
-    platformKey: string,
+  // Selected platform keys (normalized)
+  const selectedPlatformKeys = useMemo((): PlatformKey[] => {
+    return Array.from(selectedFormats)
+      .map(id => exportPresets.find(p => p.id === id)?.platformKey)
+      .filter((pk): pk is PlatformKey => pk !== undefined);
+  }, [selectedFormats]);
+
+  // Ensure metadata exists for image/platform, generate if missing, return persisted copy
+  const ensureMetadata = useCallback((
+    imageId: string,
+    platformKey: PlatformKey,
+    image: UploadedImage,
     imageIndex: number
-  ): ImageMetadata & { descriptor: string; keywordMaster: string; slugBase: string; deterministicFilename: string } => {
-    // Check if metadata exists in map
-    let metadata = metadataMap.get(imageId)?.get(platformKey);
-    
-    // Generate on-the-fly if missing
+  ): ExtendedMetadata => {
+    let platformMap = metadataMap.get(imageId);
+    let metadata = platformMap?.get(platformKey) as ExtendedMetadata | undefined;
+
+    // Generate once if missing
     if (!metadata) {
       generateMetadataForImage(imageId, platformKey, currentCategory, currentLocation);
-      metadata = metadataMap.get(imageId)?.get(platformKey);
+      platformMap = metadataMap.get(imageId);
+      metadata = platformMap?.get(platformKey) as ExtendedMetadata | undefined;
     }
 
-    // Build deterministic slug parts
+    // Build deterministic slug parts (stable per image, not random each call)
     const keywords = getKeywordsForCategory(currentCategory);
     const keywordMaster = keywords.slice(0, 3).join('; ');
-    const descriptor = getRandomDescriptor();
     
-    // Find original image for photo_id
-    const image = imagesToExport.find(img => img.id === imageId);
-    const photoId = image ? stripExtension(image.name) : `img-${imageIndex + 1}`;
+    // Use image name hash for stable descriptor instead of random
+    const descriptorIndex = image.name.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+    const descriptors = [
+      "natural light studio",
+      "floor-to-ceiling windows",
+      "white cyclorama wall",
+      "industrial chic interior",
+      "minimalist design",
+      "gallery-style walls",
+    ];
+    const descriptor = descriptors[descriptorIndex % descriptors.length];
+    
+    const photoId = stripExtension(image.name);
     
     const slugBase = buildSlugBase({
       spaceName: SPACE_CONFIG.spaceName,
@@ -148,18 +207,19 @@ export default function Export() {
       photoId,
     });
     
-    const deterministicFilename = buildFilename(slugBase, platformKey);
+    const newFilename = buildFilename(slugBase, platformKey, image.name);
 
     return {
-      filename: metadata?.filename || deterministicFilename,
-      altText: metadata?.altText || `${currentCategory} at ${currentLocation}`,
-      caption: metadata?.caption || `${currentCategory} in ${currentLocation}`,
+      filename: metadata?.filename || newFilename,
+      altText: metadata?.altText || `${descriptor} at ${SPACE_CONFIG.spaceName}, ${SPACE_CONFIG.neighborhood}, ${SPACE_CONFIG.city}.`,
+      caption: metadata?.caption || `${SPACE_CONFIG.spaceName} in ${SPACE_CONFIG.neighborhood}, ${SPACE_CONFIG.city} — ${descriptor}. Ideal for shoots/events.`,
       descriptor,
       keywordMaster,
       slugBase,
-      deterministicFilename,
+      neighborhood: SPACE_CONFIG.neighborhood,
+      city: SPACE_CONFIG.city,
     };
-  }, [metadataMap, generateMetadataForImage, currentCategory, currentLocation, imagesToExport]);
+  }, [metadataMap, generateMetadataForImage, currentCategory, currentLocation]);
 
   const toggleFormat = (id: string) => {
     setSelectedFormats(prev => {
@@ -173,173 +233,177 @@ export default function Export() {
     });
   };
 
-  // Generate LONG format CSV (one row per image per platform)
-  const generateCSV = useCallback((): string => {
-    const headers = [
-      "original_filename",
-      "new_filename", 
-      "platform",
-      "alt_text",
-      "caption",
-      "category",
-      "location",
-      "keyword_master",
-      "descriptor",
-      "slug_base"
-    ];
+  // Build export data: files and CSV rows from persisted metadata
+  const buildExportData = useCallback(() => {
+    const csvRows: CSVRow[] = [];
+    const fileEntries: Array<{ platformKey: PlatformKey; filename: string; image: UploadedImage }> = [];
 
-    const rows: string[][] = [];
+    imagesToExport.forEach((image, imageIndex) => {
+      selectedPlatformKeys.forEach(platformKey => {
+        const meta = ensureMetadata(image.id, platformKey, image, imageIndex);
+        const filename = buildFilename(meta.slugBase, platformKey, image.name);
 
-    imagesToExport.forEach((img, imgIndex) => {
-      selectedFormats.forEach(formatId => {
-        const preset = exportPresets.find(p => p.id === formatId);
-        if (!preset) return;
+        // CSV row
+        csvRows.push({
+          platformKey,
+          newFilename: filename,
+          altText: meta.altText,
+          caption: meta.caption,
+          keywordMaster: meta.keywordMaster,
+          descriptor: meta.descriptor,
+          slugBase: meta.slugBase,
+          neighborhood: meta.neighborhood,
+          city: meta.city,
+          category: currentCategory,
+          originalFilename: image.name,
+        });
 
-        const meta = getOrGenerateMetadata(img.id, preset.platformKey, imgIndex);
-        
-        rows.push([
-          img.name,
-          meta.deterministicFilename,
-          preset.label,
-          `"${meta.altText.replace(/"/g, '""')}"`,
-          `"${meta.caption.replace(/"/g, '""')}"`,
-          currentCategory,
-          currentLocation,
-          meta.keywordMaster,
-          meta.descriptor,
-          meta.slugBase
-        ]);
+        // File entry
+        fileEntries.push({
+          platformKey,
+          filename,
+          image,
+        });
       });
     });
 
-    return [headers.join(","), ...rows.map(row => row.join(","))].join("\n");
-  }, [imagesToExport, selectedFormats, getOrGenerateMetadata, currentCategory, currentLocation]);
+    return { csvRows, fileEntries };
+  }, [imagesToExport, selectedPlatformKeys, ensureMetadata, currentCategory]);
 
-  // Generate WIDE format master CSV (one row per image with all platform columns)
+  // Integrity check: verify CSV rows match file entries
+  const runIntegrityCheck = useCallback((
+    csvRows: CSVRow[],
+    addedFiles: Set<string>
+  ): { valid: boolean; missing: string[] } => {
+    const missing: string[] = [];
+
+    csvRows.forEach(row => {
+      const filePath = `${row.platformKey}/${row.newFilename}`;
+      if (!addedFiles.has(filePath)) {
+        missing.push(filePath);
+      }
+    });
+
+    return { valid: missing.length === 0, missing };
+  }, []);
+
+  // Generate RFC-compliant CSV using PapaParse
+  const generateCSV = useCallback((rows: CSVRow[]): string => {
+    return Papa.unparse(rows, {
+      quotes: true, // Quote all fields
+      header: true,
+    });
+  }, []);
+
+  // Generate master CSV (wide format)
   const generateMasterCSV = useCallback((): string => {
-    const headers = [
-      "photo_id",
-      "original_filename",
-      "category",
-      "location",
-      "descriptor",
-      "keyword_master",
-      "slug_base",
-      "filename_web",
-      "filename_instagram",
-      "filename_pinterest",
-      "filename_gbp",
-      "filename_messaging",
-      "filename_print",
-      "alt_web",
-      "caption_web",
-      "caption_instagram",
-      "caption_google_business",
-      "pinterest_title",
-      "pinterest_description",
-      "hashtags",
-      "notes"
-    ];
-
-    const platformKeys = ['web', 'instagram', 'pinterest', 'google-business', 'messaging', 'print'];
-    const rows: string[][] = [];
-
-    imagesToExport.forEach((img, imgIndex) => {
-      const photoId = stripExtension(img.name);
-      
-      // Get metadata for all platforms
-      const allMeta: Record<string, ReturnType<typeof getOrGenerateMetadata>> = {};
-      platformKeys.forEach(pk => {
-        allMeta[pk] = getOrGenerateMetadata(img.id, pk, imgIndex);
+    const rows = imagesToExport.map((image, imageIndex) => {
+      const allMeta: Record<PlatformKey, ExtendedMetadata> = {} as Record<PlatformKey, ExtendedMetadata>;
+      PLATFORM_KEYS.forEach(pk => {
+        allMeta[pk] = ensureMetadata(image.id, pk, image, imageIndex);
       });
 
-      // Use web metadata for common fields
       const webMeta = allMeta['web'];
       const keywords = getKeywordsForCategory(currentCategory);
       const hashtags = keywords.slice(0, 5).map(k => `#${k.replace(/\s+/g, '')}`).join(' ');
 
-      rows.push([
-        photoId,
-        img.name,
-        currentCategory,
-        currentLocation,
-        webMeta.descriptor,
-        webMeta.keywordMaster,
-        webMeta.slugBase,
-        allMeta['web'].deterministicFilename,
-        allMeta['instagram'].deterministicFilename,
-        allMeta['pinterest'].deterministicFilename,
-        allMeta['google-business'].deterministicFilename,
-        allMeta['messaging'].deterministicFilename,
-        allMeta['print'].deterministicFilename,
-        `"${allMeta['web'].altText.replace(/"/g, '""')}"`,
-        `"${allMeta['web'].caption.replace(/"/g, '""')}"`,
-        `"${allMeta['instagram'].caption.replace(/"/g, '""')}"`,
-        `"${allMeta['google-business'].caption.replace(/"/g, '""')}"`,
-        `"${currentCategory} Ideas | ${SPACE_CONFIG.neighborhood} ${SPACE_CONFIG.city}"`,
-        `"${webMeta.descriptor} perfect for ${currentCategory.toLowerCase()}. Book now!"`,
+      return {
+        photo_id: stripExtension(image.name),
+        original_filename: image.name,
+        category: currentCategory,
+        neighborhood: SPACE_CONFIG.neighborhood,
+        city: SPACE_CONFIG.city,
+        descriptor: webMeta.descriptor,
+        keyword_master: webMeta.keywordMaster,
+        slug_base: webMeta.slugBase,
+        filename_web: buildFilename(allMeta['web'].slugBase, 'web', image.name),
+        filename_instagram: buildFilename(allMeta['instagram'].slugBase, 'instagram', image.name),
+        filename_pinterest: buildFilename(allMeta['pinterest'].slugBase, 'pinterest', image.name),
+        filename_gbp: buildFilename(allMeta['google-business'].slugBase, 'google-business', image.name),
+        filename_messaging: buildFilename(allMeta['messaging'].slugBase, 'messaging', image.name),
+        filename_print: buildFilename(allMeta['print'].slugBase, 'print', image.name),
+        alt_web: allMeta['web'].altText,
+        caption_web: allMeta['web'].caption,
+        caption_instagram: allMeta['instagram'].caption,
+        caption_google_business: allMeta['google-business'].caption,
+        pinterest_title: `${currentCategory} Ideas | ${SPACE_CONFIG.neighborhood} ${SPACE_CONFIG.city}`,
+        pinterest_description: `${webMeta.descriptor} perfect for ${currentCategory.toLowerCase()}. Book now!`,
         hashtags,
-        "" // notes - empty by default
-      ]);
+        notes: '',
+      };
     });
 
-    return [headers.join(","), ...rows.map(row => row.join(","))].join("\n");
-  }, [imagesToExport, getOrGenerateMetadata, currentCategory, currentLocation]);
+    return Papa.unparse(rows, { quotes: true, header: true });
+  }, [imagesToExport, ensureMetadata, currentCategory]);
 
   const handleExportPack = useCallback(async () => {
     setIsExporting(true);
+    setExportError(null);
     setProgress({ step: "Preparing export...", percentage: 0, isComplete: false });
 
     const zip = new JSZip();
-    // Steps: building metadata + (formats * images) + 2 CSVs + finalization
-    const totalSteps = 1 + (selectedFormats.size * imagesToExport.length) + 3;
+    const { csvRows, fileEntries } = buildExportData();
+    const addedFiles = new Set<string>();
+
+    // Steps: building metadata + files + integrity check + CSVs + finalization
+    const totalSteps = 1 + fileEntries.length + 4;
     let currentStep = 0;
 
     try {
       // Step 1: Building metadata rows
       currentStep++;
       setProgress({ step: "Building metadata rows...", percentage: Math.round((currentStep / totalSteps) * 100), isComplete: false });
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 50));
 
-      // Create folders and add images
-      for (const formatId of Array.from(selectedFormats)) {
-        const preset = exportPresets.find(p => p.id === formatId);
-        if (!preset) continue;
+      // Create folders for each selected platform
+      const folders: Record<PlatformKey, JSZip | null> = {} as Record<PlatformKey, JSZip | null>;
+      selectedPlatformKeys.forEach(pk => {
+        folders[pk] = zip.folder(pk);
+      });
 
-        const folderName = platformExportConfigs[preset.platformKey as keyof typeof platformExportConfigs]?.folder || formatId;
-        const folder = zip.folder(folderName);
+      // Add files to ZIP
+      for (const entry of fileEntries) {
+        currentStep++;
+        const pct = Math.round((currentStep / totalSteps) * 100);
+        setProgress({ step: `Processing ${entry.filename}...`, percentage: pct, isComplete: false });
 
-        for (let imgIndex = 0; imgIndex < imagesToExport.length; imgIndex++) {
-          const img = imagesToExport[imgIndex];
-          currentStep++;
-          const pct = Math.round((currentStep / totalSteps) * 100);
-          setProgress({ step: `Processing ${preset.label}...`, percentage: pct, isComplete: false });
-
-          // Get deterministic filename
-          const meta = getOrGenerateMetadata(img.id, preset.platformKey, imgIndex);
-
-          // In a real implementation, we'd resize/convert the image here
-          // For now, we'll fetch the blob from the preview URL
-          try {
-            const response = await fetch(img.preview);
-            const blob = await response.blob();
-            folder?.file(meta.deterministicFilename, blob);
-          } catch {
-            console.warn(`Could not process ${img.name}`);
-          }
-
-          await new Promise(resolve => setTimeout(resolve, 30));
+        try {
+          const response = await fetch(entry.image.preview);
+          const blob = await response.blob();
+          folders[entry.platformKey]?.file(entry.filename, blob);
+          addedFiles.add(`${entry.platformKey}/${entry.filename}`);
+        } catch {
+          console.warn(`Could not process ${entry.image.name}`);
         }
+
+        await new Promise(resolve => setTimeout(resolve, 20));
       }
 
-      // Generate and add long-format CSV
+      // Step: Integrity check
+      currentStep++;
+      setProgress({ step: "Running integrity check...", percentage: Math.round((currentStep / totalSteps) * 100), isComplete: false });
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const integrityResult = runIntegrityCheck(csvRows, addedFiles);
+      
+      if (!integrityResult.valid) {
+        setExportError({
+          message: "ZIP/CSV mismatch detected",
+          details: integrityResult.missing.slice(0, 10), // Show first 10
+        });
+        setIsExporting(false);
+        setProgress({ step: "", percentage: 0, isComplete: false });
+        return;
+      }
+
+      // Add metadata.csv (long format)
       currentStep++;
       setProgress({ step: "Generating metadata.csv...", percentage: Math.round((currentStep / totalSteps) * 100), isComplete: false });
-      const csv = generateCSV();
+      const csv = generateCSV(csvRows);
       zip.file("metadata.csv", csv);
       await new Promise(resolve => setTimeout(resolve, 50));
 
-      // Generate and add master CSV
+      // Add metadata_master.csv (wide format)
       currentStep++;
       setProgress({ step: "Generating metadata_master.csv...", percentage: Math.round((currentStep / totalSteps) * 100), isComplete: false });
       const masterCsv = generateMasterCSV();
@@ -358,7 +422,7 @@ export default function Export() {
       const url = URL.createObjectURL(content);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `optimized-images-${Date.now()}.zip`;
+      a.download = `studio-export-${Date.now()}.zip`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -379,10 +443,11 @@ export default function Export() {
         setProgress({ step: "", percentage: 0, isComplete: false });
       }, 2000);
     }
-  }, [selectedFormats, imagesToExport, getOrGenerateMetadata, generateCSV, generateMasterCSV]);
+  }, [selectedFormats, selectedPlatformKeys, buildExportData, runIntegrityCheck, generateCSV, generateMasterCSV]);
 
   const handleDownloadCSV = useCallback(() => {
-    const csv = generateCSV();
+    const { csvRows } = buildExportData();
+    const csv = generateCSV(csvRows);
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -392,7 +457,7 @@ export default function Export() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [generateCSV]);
+  }, [buildExportData, generateCSV]);
 
   // Redirect if no images at all
   if (images.length === 0) {
@@ -417,6 +482,7 @@ export default function Export() {
 
   // Always have images to export (fallback to all if none selected)
   const canExport = imagesToExport.length > 0 && selectedFormats.size > 0;
+  const expectedFileCount = imagesToExport.length * selectedPlatformKeys.length;
 
   return (
     <Layout>
@@ -452,7 +518,7 @@ export default function Export() {
                 ) : (
                   <>
                     <Package className="w-4 h-4 mr-2" />
-                    Download Pack ({selectedFormats.size})
+                    Download Pack ({expectedFileCount} files)
                   </>
                 )}
               </Button>
@@ -460,6 +526,30 @@ export default function Export() {
           </div>
         </div>
       </section>
+
+      {/* Error Alert */}
+      {exportError && (
+        <section className="py-4 px-6 lg:px-12 bg-destructive/10 border-b border-destructive/20">
+          <div className="max-w-7xl mx-auto flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-destructive mt-0.5" />
+            <div>
+              <p className="font-medium text-destructive">{exportError.message}</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                Missing files: {exportError.details.join(', ')}
+                {exportError.details.length >= 10 && '...'}
+              </p>
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                className="mt-2 h-7 px-2"
+                onClick={() => setExportError(null)}
+              >
+                Dismiss
+              </Button>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Progress Bar */}
       {isExporting && (
@@ -496,144 +586,107 @@ export default function Export() {
               <div className="sticky top-24 space-y-6">
                 {/* Image Grid Preview */}
                 <div className="grid grid-cols-3 gap-2">
-                  {imagesToExport.slice(0, 6).map((img, idx) => (
+                  {imagesToExport.slice(0, 6).map((img) => (
                     <div key={img.id} className="aspect-square bg-muted border border-border overflow-hidden relative">
                       <img 
                         src={img.preview} 
                         alt={img.name}
                         className="w-full h-full object-cover"
                       />
-                      {idx === 5 && imagesToExport.length > 6 && (
-                        <div className="absolute inset-0 bg-foreground/80 flex items-center justify-center">
-                          <span className="text-background font-medium">+{imagesToExport.length - 6}</span>
-                        </div>
-                      )}
                     </div>
                   ))}
+                  {imagesToExport.length > 6 && (
+                    <div className="aspect-square bg-muted border border-border flex items-center justify-center">
+                      <span className="text-sm text-muted-foreground">+{imagesToExport.length - 6}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Summary */}
-                <div className="space-y-4 p-6 bg-muted/50 border border-border">
-                  <h3 className="text-caption text-muted-foreground">Export Summary</h3>
-                  
-                  <div className="space-y-3 text-sm">
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Images</span>
-                      <span>{imagesToExport.length} {selectedImageIds.size > 0 ? '(selected)' : '(all)'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Formats selected</span>
-                      <span>{selectedFormats.size}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Total files</span>
-                      <span>{imagesToExport.length * selectedFormats.size}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">CSV rows</span>
-                      <span>{imagesToExport.length * selectedFormats.size}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Category</span>
-                      <span className="truncate max-w-[150px]">{currentCategory}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Location</span>
-                      <span className="truncate max-w-[150px]">{currentLocation}</span>
-                    </div>
+                <div className="p-4 border border-border bg-card">
+                  <p className="text-sm font-medium mb-2">Export Summary</p>
+                  <div className="space-y-1 text-sm text-muted-foreground">
+                    <p>{imagesToExport.length} images × {selectedPlatformKeys.length} platforms</p>
+                    <p>= {expectedFileCount} total files</p>
+                    <p className="text-xs mt-2">+ metadata.csv + metadata_master.csv</p>
                   </div>
                 </div>
-
-                {/* Back Link */}
-                <Link 
-                  to="/optimize" 
-                  className="inline-block text-sm text-muted-foreground hover:text-foreground transition-colors link-editorial"
-                >
-                  ← Back to optimization
-                </Link>
               </div>
             </div>
 
-            {/* Right - Export Options */}
+            {/* Right - Format Selection */}
             <div className="lg:col-span-7">
-              <h2 className="text-caption text-muted-foreground mb-6">Select Export Formats</h2>
-              
-              <div className="space-y-4">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-lg font-medium">Select Formats</h2>
+                <p className="text-sm text-muted-foreground">
+                  {selectedFormats.size} of {exportPresets.length} selected
+                </p>
+              </div>
+
+              <div className="grid gap-3">
                 {exportPresets.map((preset) => {
                   const isSelected = selectedFormats.has(preset.id);
-                  const isDownloaded = downloaded.has(preset.id);
-                  
+                  const wasDownloaded = downloaded.has(preset.id);
+                  const Icon = preset.icon;
+
                   return (
                     <button
                       key={preset.id}
                       onClick={() => toggleFormat(preset.id)}
+                      disabled={isExporting}
                       className={cn(
-                        "w-full border p-6 transition-all duration-200 text-left",
+                        "w-full p-4 border text-left transition-all",
+                        "hover:bg-muted/50 focus:outline-none focus:ring-2 focus:ring-ring",
                         isSelected 
                           ? "border-foreground bg-muted/30" 
-                          : "border-border hover:border-muted-foreground"
+                          : "border-border",
+                        isExporting && "opacity-50 cursor-not-allowed"
                       )}
                     >
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="flex items-start gap-4">
-                          <div className={cn(
-                            "w-6 h-6 rounded-full border-2 flex items-center justify-center flex-shrink-0",
-                            isSelected ? "border-foreground bg-foreground" : "border-muted-foreground"
-                          )}>
-                            {isSelected && <Check className="w-4 h-4 text-background" />}
-                          </div>
-                          <preset.icon className="w-5 h-5 mt-0.5 text-muted-foreground" />
-                          <div>
-                            <div className="flex items-center gap-3 mb-1">
-                              <h3 className="font-medium">{preset.label}</h3>
-                              {isDownloaded && (
-                                <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                                  <Check className="w-3 h-3" />
-                                  Exported
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-sm text-muted-foreground">{preset.desc}</p>
-                          </div>
+                      <div className="flex items-center gap-4">
+                        <div className={cn(
+                          "w-10 h-10 flex items-center justify-center border",
+                          isSelected ? "border-foreground" : "border-border"
+                        )}>
+                          <Icon className="w-5 h-5" />
                         </div>
-                      </div>
-
-                      {/* Specs */}
-                      <div className="flex items-center gap-6 mt-4 pl-16 text-xs text-muted-foreground">
-                        <span className="font-mono">{preset.format}</span>
-                        <span>{preset.dimensions}</span>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium">{preset.label}</span>
+                            {wasDownloaded && (
+                              <Check className="w-4 h-4 text-muted-foreground" />
+                            )}
+                          </div>
+                          <p className="text-sm text-muted-foreground">{preset.desc}</p>
+                        </div>
+                        <div className="text-right text-sm text-muted-foreground">
+                          <p>{preset.format}</p>
+                          <p>{preset.dimensions}</p>
+                        </div>
+                        <div className={cn(
+                          "w-5 h-5 border flex items-center justify-center",
+                          isSelected 
+                            ? "border-foreground bg-foreground" 
+                            : "border-muted-foreground"
+                        )}>
+                          {isSelected && <Check className="w-3 h-3 text-background" />}
+                        </div>
                       </div>
                     </button>
                   );
                 })}
               </div>
 
-              {/* ZIP Contents Info */}
-              <div className="mt-12 p-6 bg-muted/30 border border-border">
-                <h3 className="text-caption text-muted-foreground mb-4">Export Pack Contents</h3>
-                <div className="grid sm:grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <p className="font-medium mb-1">Folder Structure</p>
-                    <p className="text-muted-foreground text-xs font-mono">
-                      /web, /instagram, /pinterest,<br/>
-                      /google-business, /messaging, /print
-                    </p>
-                  </div>
-                  <div>
-                    <p className="font-medium mb-1">Metadata CSV</p>
-                    <p className="text-muted-foreground text-xs">
-                      Includes original filename, new filename, platform, alt text, caption, category, location, keywords
-                    </p>
-                  </div>
+              {/* Folder structure preview */}
+              <div className="mt-8 p-4 border border-border bg-card/50">
+                <p className="text-sm font-medium mb-3">ZIP Structure Preview</p>
+                <div className="font-mono text-xs text-muted-foreground space-y-1">
+                  {selectedPlatformKeys.map(pk => (
+                    <p key={pk}>/{pk}/ ({imagesToExport.length} files)</p>
+                  ))}
+                  <p className="mt-2 text-foreground">/metadata.csv</p>
+                  <p className="text-foreground">/metadata_master.csv</p>
                 </div>
-              </div>
-
-              {/* CTA */}
-              <div className="mt-12 text-center">
-                <p className="text-muted-foreground mb-4">Need to optimize more images?</p>
-                <Button asChild variant="editorial" size="editorial">
-                  <Link to="/library">Back to Library</Link>
-                </Button>
               </div>
             </div>
           </div>
