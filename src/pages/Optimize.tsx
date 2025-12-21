@@ -13,15 +13,23 @@ import {
   RefreshCw,
   ChevronRight,
   ChevronLeft,
-  ImageIcon
+  ImageIcon,
+  Wand2
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Link, useNavigate } from "react-router-dom";
 import { useImageContext } from "@/context/ImageContext";
-import { categoryKeywords } from "@/lib/seo-templates";
+import { SPACE_CATEGORIES, CATEGORY_LABELS, SpaceCategory } from "@/lib/metadata-engine";
 import { PlatformKey } from "@/lib/slug-utils";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
-// Normalized platform keys - must match PLATFORM_KEYS
+// Normalized platform keys
 const platforms: Array<{
   id: PlatformKey;
   icon: typeof Globe;
@@ -35,8 +43,6 @@ const platforms: Array<{
   { id: "messaging", icon: MessageCircle, label: "WhatsApp/iMessage", desc: "Fast loading previews" },
   { id: "print", icon: Printer, label: "Hi-Res Print", desc: "Maximum quality" },
 ];
-
-const categories = Object.keys(categoryKeywords);
 
 const formatFileSize = (bytes: number) => {
   if (bytes >= 1024 * 1024) {

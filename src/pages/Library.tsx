@@ -1,10 +1,23 @@
 import { useState, useCallback } from "react";
 import { Layout } from "@/components/layout/Layout";
 import { Button } from "@/components/ui/button";
-import { Upload, Check, Trash2, Settings } from "lucide-react";
+import { Upload, Check, Trash2, Settings, Tag } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useNavigate } from "react-router-dom";
 import { useImageContext } from "@/context/ImageContext";
+import { CATEGORY_LABELS, SpaceCategory, SPACE_CATEGORIES } from "@/lib/metadata-engine";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 
 const formatFileSize = (bytes: number) => {
   if (bytes >= 1024 * 1024) {
