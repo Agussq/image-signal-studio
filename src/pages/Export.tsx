@@ -13,13 +13,15 @@ import {
   FileText,
   ImageIcon,
   Loader2,
-  AlertCircle
+  AlertCircle,
+  HardDrive
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Link } from "react-router-dom";
 import { useImageContext, UploadedImage, ImageMetadata } from "@/context/ImageContext";
 import { getKeywordsForCategory } from "@/lib/seo-templates";
 import { stripExtension, buildFilename, PLATFORM_KEYS, PlatformKey } from "@/lib/slug-utils";
+import { processImageForPlatform, platformExportConfigs, formatBytes, ProcessedImage } from "@/lib/image-processor";
 import JSZip from "jszip";
 import Papa from "papaparse";
 
@@ -42,8 +44,8 @@ const exportPresets: Array<{
     icon: Globe, 
     label: "Web-Optimized",
     format: "JPG",
-    dimensions: "1920 × 1280",
-    desc: "SEO-ready, fast loading"
+    dimensions: `max ${platformExportConfigs.web.maxDimension}px`,
+    desc: `SEO-ready, q=${Math.round(platformExportConfigs.web.quality * 100)}%`
   },
   { 
     id: "google-business", 
@@ -51,8 +53,8 @@ const exportPresets: Array<{
     icon: MapPin, 
     label: "Google Business",
     format: "JPG",
-    dimensions: "1200 × 900",
-    desc: "Maps & Business Profile"
+    dimensions: `max ${platformExportConfigs['google-business'].maxDimension}px`,
+    desc: `Maps & Profile, q=${Math.round(platformExportConfigs['google-business'].quality * 100)}%`
   },
   { 
     id: "instagram", 
@@ -60,8 +62,8 @@ const exportPresets: Array<{
     icon: Instagram, 
     label: "Instagram-Ready",
     format: "JPG",
-    dimensions: "1080 × 1350",
-    desc: "Portrait ratio, high quality"
+    dimensions: `max ${platformExportConfigs.instagram.maxDimension}px`,
+    desc: `High quality, q=${Math.round(platformExportConfigs.instagram.quality * 100)}%`
   },
   { 
     id: "pinterest", 
@@ -69,8 +71,8 @@ const exportPresets: Array<{
     icon: Share2, 
     label: "Pinterest-Ready",
     format: "JPG",
-    dimensions: "1000 × 1500",
-    desc: "Vertical pin format"
+    dimensions: `max ${platformExportConfigs.pinterest.maxDimension}px`,
+    desc: `Pin format, q=${Math.round(platformExportConfigs.pinterest.quality * 100)}%`
   },
   { 
     id: "messaging", 
@@ -78,8 +80,8 @@ const exportPresets: Array<{
     icon: MessageCircle, 
     label: "Messaging-Ready",
     format: "JPG",
-    dimensions: "800 × 600",
-    desc: "Fast preview loading"
+    dimensions: `max ${platformExportConfigs.messaging.maxDimension}px`,
+    desc: `Fast loading, q=${Math.round(platformExportConfigs.messaging.quality * 100)}%`
   },
   { 
     id: "print", 
@@ -87,8 +89,8 @@ const exportPresets: Array<{
     icon: Printer, 
     label: "Print-Ready",
     format: "JPG",
-    dimensions: "6000 × 4000",
-    desc: "Full resolution, 300 DPI"
+    dimensions: `max ${platformExportConfigs.print.maxDimension}px`,
+    desc: `Full res, q=${Math.round(platformExportConfigs.print.quality * 100)}%`
   },
 ];
 
@@ -127,6 +129,15 @@ interface CSVRow {
   slug_base: string;
 }
 
+// File size tracking per file
+interface FileSizeInfo {
+  filename: string;
+  platform: PlatformKey;
+  sizeKB: number;
+  width: number;
+  height: number;
+}
+
 // Export manifest for debug/verification
 interface ExportManifest {
   selectedImageCount: number;
@@ -134,6 +145,8 @@ interface ExportManifest {
   expectedTotalFiles: number;
   actualZipFiles: number;
   csvRowsGenerated: number;
+  totalSizeKB: number;
+  fileSizes: FileSizeInfo[];
 }
 
 export default function Export() {
@@ -376,6 +389,9 @@ export default function Export() {
     const totalSteps = 2 + fileEntries.length + 3;
     let currentStep = 0;
 
+    const fileSizes: FileSizeInfo[] = [];
+    let totalSizeBytes = 0;
+
     try {
       // Step: Building metadata rows
       currentStep++;
@@ -388,31 +404,46 @@ export default function Export() {
         folders[pk] = zip.folder(pk);
       });
 
-      // Add files to ZIP
+      // Add files to ZIP with real resizing/compression
       for (const entry of fileEntries) {
         currentStep++;
         const pct = Math.round((currentStep / totalSteps) * 100);
-        setProgress({ step: `Processing ${entry.filename}...`, percentage: pct, isComplete: false });
+        const config = platformExportConfigs[entry.platformKey];
+        setProgress({ 
+          step: `Resizing ${entry.filename} (max ${config.maxDimension}px, q=${Math.round(config.quality * 100)}%)...`, 
+          percentage: pct, 
+          isComplete: false 
+        });
 
         try {
-          const response = await fetch(entry.image.preview);
-          const blob = await response.blob();
-          folders[entry.platformKey]?.file(entry.filename, blob);
+          // Process image: resize and compress as JPEG
+          const processed = await processImageForPlatform(entry.image.preview, entry.platformKey);
+          
+          folders[entry.platformKey]?.file(entry.filename, processed.blob);
           addedFileCount++;
-        } catch {
-          console.warn(`Could not process ${entry.image.name}`);
+          totalSizeBytes += processed.blob.size;
+          
+          fileSizes.push({
+            filename: entry.filename,
+            platform: entry.platformKey,
+            sizeKB: processed.sizeKB,
+            width: processed.width,
+            height: processed.height,
+          });
+        } catch (err) {
+          console.warn(`Could not process ${entry.image.name}:`, err);
         }
-
-        await new Promise(resolve => setTimeout(resolve, 20));
       }
 
-      // Update manifest with current counts
+      // Update manifest with current counts and sizes
       const currentManifest: ExportManifest = {
         selectedImageCount: imagesToExport.length,
         platformCount: selectedPlatformKeys.length,
         expectedTotalFiles: expectedFileCount,
         actualZipFiles: addedFileCount,
         csvRowsGenerated: csvRows.length,
+        totalSizeKB: Math.round(totalSizeBytes / 1024),
+        fileSizes,
       };
       setManifest(currentManifest);
 
@@ -514,7 +545,7 @@ export default function Export() {
       return;
     }
 
-    // Update manifest for visibility
+    // Update manifest for visibility (CSV only - no file sizes)
     const expectedCount = imagesToExport.length * selectedPlatformKeys.length;
     setManifest({
       selectedImageCount: imagesToExport.length,
@@ -522,6 +553,8 @@ export default function Export() {
       expectedTotalFiles: expectedCount,
       actualZipFiles: exportData.fileEntries.length,
       csvRowsGenerated: exportData.csvRows.length,
+      totalSizeKB: 0,
+      fileSizes: [],
     });
 
     const csv = generateCSV(exportData.csvRows);
@@ -724,7 +757,7 @@ export default function Export() {
               <FileText className="w-4 h-4 text-muted-foreground" />
               <h3 className="text-sm font-medium">Export Manifest</h3>
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-4 text-sm">
               <div className="p-3 border border-border bg-background">
                 <p className="text-muted-foreground text-xs mb-1">Selected Images</p>
                 <p className="font-mono font-medium">{manifest.selectedImageCount}</p>
@@ -751,7 +784,46 @@ export default function Export() {
                   manifest.csvRowsGenerated === manifest.expectedTotalFiles ? "text-green-600" : "text-destructive"
                 )}>{manifest.csvRowsGenerated}</p>
               </div>
+              <div className="p-3 border border-border bg-background">
+                <div className="flex items-center gap-1 text-muted-foreground text-xs mb-1">
+                  <HardDrive className="w-3 h-3" />
+                  <span>Total Size</span>
+                </div>
+                <p className="font-mono font-medium">{formatBytes(manifest.totalSizeKB * 1024)}</p>
+              </div>
             </div>
+            
+            {/* Per-file size breakdown */}
+            {manifest.fileSizes.length > 0 && (
+              <details className="mt-4">
+                <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+                  View per-file sizes ({manifest.fileSizes.length} files)
+                </summary>
+                <div className="mt-3 max-h-64 overflow-y-auto border border-border bg-background">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-muted">
+                      <tr>
+                        <th className="text-left p-2 font-medium">Platform</th>
+                        <th className="text-left p-2 font-medium">Filename</th>
+                        <th className="text-right p-2 font-medium">Dimensions</th>
+                        <th className="text-right p-2 font-medium">Size</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {manifest.fileSizes.map((file, idx) => (
+                        <tr key={idx} className="border-t border-border">
+                          <td className="p-2 text-muted-foreground">{file.platform}</td>
+                          <td className="p-2 font-mono truncate max-w-[200px]">{file.filename}</td>
+                          <td className="p-2 text-right text-muted-foreground">{file.width}×{file.height}</td>
+                          <td className="p-2 text-right font-mono">{file.sizeKB} KB</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
+            
             {manifest.actualZipFiles === manifest.expectedTotalFiles && 
              manifest.csvRowsGenerated === manifest.expectedTotalFiles && (
               <p className="text-xs text-green-600 mt-3 flex items-center gap-2">
