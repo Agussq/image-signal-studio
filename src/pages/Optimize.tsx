@@ -19,10 +19,17 @@ import { cn } from "@/lib/utils";
 import { Link, useNavigate } from "react-router-dom";
 import { useImageContext } from "@/context/ImageContext";
 import { categoryKeywords } from "@/lib/seo-templates";
+import { PlatformKey } from "@/lib/slug-utils";
 
-const platforms = [
-  { id: "website", icon: Globe, label: "Website (SEO)", desc: "Optimized for search engines" },
-  { id: "google-maps", icon: MapPin, label: "Google Maps", desc: "Local business visibility" },
+// Normalized platform keys - must match PLATFORM_KEYS
+const platforms: Array<{
+  id: PlatformKey;
+  icon: typeof Globe;
+  label: string;
+  desc: string;
+}> = [
+  { id: "web", icon: Globe, label: "Website (SEO)", desc: "Optimized for search engines" },
+  { id: "google-business", icon: MapPin, label: "Google Business", desc: "Local business visibility" },
   { id: "instagram", icon: Instagram, label: "Instagram", desc: "Engagement-focused" },
   { id: "pinterest", icon: Share2, label: "Pinterest", desc: "Discovery optimized" },
   { id: "messaging", icon: MessageCircle, label: "WhatsApp/iMessage", desc: "Fast loading previews" },
@@ -44,7 +51,7 @@ export default function Optimize() {
     getSelectedImages,
     metadataMap,
     generateMetadataForImage,
-    generateMetadataForAll,
+    generateMetadataForAllPlatforms,
     updateMetadata,
     markAsOptimized,
     currentPlatform,
@@ -69,7 +76,6 @@ export default function Optimize() {
   // Redirect if no images selected
   useEffect(() => {
     if (selectedImages.length === 0) {
-      // Don't redirect immediately, give context time to load
       const timer = setTimeout(() => {
         if (selectedImages.length === 0) {
           navigate("/library");
@@ -88,10 +94,11 @@ export default function Optimize() {
     }, 800);
   };
 
+  // Generate metadata for ALL platforms for all selected images
   const handleGenerateAll = () => {
     setIsGenerating(true);
     setTimeout(() => {
-      generateMetadataForAll(currentPlatform, currentCategory, currentLocation);
+      generateMetadataForAllPlatforms(currentCategory, currentLocation);
       markAsOptimized(selectedImages.map(img => img.id));
       setIsGenerating(false);
     }, 1200);
@@ -321,7 +328,7 @@ export default function Optimize() {
                   ) : (
                     <>
                       <Sparkles className="w-4 h-4 mr-2" />
-                      Generate for All ({selectedImages.length})
+                      Generate All Platforms ({selectedImages.length})
                     </>
                   )}
                 </Button>
@@ -334,7 +341,7 @@ export default function Optimize() {
                     <div className="w-2 h-2 bg-foreground rounded-full" />
                     <span>Generated for {platform?.label}</span>
                     <span className="text-caption bg-muted text-muted-foreground px-2 py-0.5 ml-2">
-                      AI-Generated
+                      Template-Generated
                     </span>
                   </div>
 
@@ -345,8 +352,8 @@ export default function Optimize() {
                     </label>
                     <input
                       type="text"
-                      value={currentMetadata.filename}
-                      onChange={(e) => updateMetadata(currentImage!.id, currentPlatform, { filename: e.target.value })}
+                      value={currentMetadata.newFilename || currentMetadata.filename}
+                      onChange={(e) => updateMetadata(currentImage!.id, currentPlatform, { filename: e.target.value, newFilename: e.target.value })}
                       className="w-full px-4 py-3 border border-border bg-transparent font-mono text-sm focus:outline-none focus:border-foreground transition-colors"
                     />
                   </div>
