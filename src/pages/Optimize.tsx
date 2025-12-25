@@ -269,7 +269,7 @@ export default function Optimize() {
               <div>
                 <h3 className="text-caption text-muted-foreground mb-4">Content Category</h3>
                 <div className="flex flex-wrap gap-2">
-                  {categories.map((cat) => (
+                  {SPACE_CATEGORIES.map((cat) => (
                     <button
                       key={cat}
                       onClick={() => setCurrentCategory(cat)}
@@ -280,7 +280,7 @@ export default function Optimize() {
                           : "border-border hover:border-muted-foreground"
                       )}
                     >
-                      {cat}
+                      {CATEGORY_LABELS[cat]}
                     </button>
                   ))}
                 </div>
